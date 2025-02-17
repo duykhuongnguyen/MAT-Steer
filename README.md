@@ -2,6 +2,8 @@
 
 [Duy Nguyen](https://duykhuongnguyen.github.io/), [Archiki Prasad](https://archiki.github.io/), [Elias Stengel-Eskin](https://esteng.github.io/), and [Mohit Bansal](https://www.cs.unc.edu/~mbansal/).
 
+![image](assets/mat_steer_fig.png)
+
 ## **Overview**
 This repository provides the implementation for **Multi-Attribute Steering of Language Models via Targeted Interventions (MAT-Steer)**. MAT-Steer enables selective token-level intervention across multiple attributes for language models.
 
