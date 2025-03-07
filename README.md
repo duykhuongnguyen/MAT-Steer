@@ -50,9 +50,15 @@ Navigate to the `validation` directory. Running using the default setting:
    ```
 
 ### **3. Apply Targeted Intervention**
-   ```bash
-   CUDA_VISIBLE_DEVICES=0 python edit_weight --model_name llama3.1_8B
-   ```
+Then the steering vectors can be integrated into models following [ITI](https://github.com/likenneth/honest_llama) and [pyvene](https://github.com/stanfordnlp/pyvene). The entire code on steering and evaluation will be releasing soon.
 
 ## **Citations**
 If you find this work useful, please consider citing our paper:
+    ```
+    @article{nguyen2025multi,
+        title={Multi-Attribute Steering of Language Models via Targeted Intervention},
+        author={Nguyen, Duy and Prasad, Archiki and Stengel-Eskin, Elias and Bansal, Mohit},
+        journal={arXiv preprint arXiv:2502.12446},
+        year={2025}
+    }
+    ```
