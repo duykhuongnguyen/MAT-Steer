@@ -54,7 +54,7 @@ Then the steering vectors can be integrated into models following [ITI](https://
 
 ## **Citations**
 If you find this work useful, please consider citing our paper:
-    ```
+    ```bash
     @article{nguyen2025multi,
         title={Multi-Attribute Steering of Language Models via Targeted Intervention},
         author={Nguyen, Duy and Prasad, Archiki and Stengel-Eskin, Elias and Bansal, Mohit},
