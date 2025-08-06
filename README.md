@@ -50,7 +50,7 @@ Navigate to the `validation` directory. Running using the default setting:
    ```
 
 ### **3. Apply Targeted Intervention**
-Then the steering vectors can be integrated into models following [ITI](https://github.com/likenneth/honest_llama) and [pyvene](https://github.com/stanfordnlp/pyvene). The entire code on steering and evaluation will be releasing soon.
+Then the steering vectors can be integrated into models following [ITI](https://github.com/likenneth/honest_llama) and [pyvene](https://github.com/stanfordnlp/pyvene).
 
 ## **Citations**
 If you find this work useful, please consider citing our paper:
