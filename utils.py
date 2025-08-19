@@ -1,31 +1,28 @@
 # Utils to work with pyvene
 
-import os
 import sys
 sys.path.insert(0, "TruthfulQA")
+import json
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-# import llama
 from datasets import load_dataset
 from tqdm import tqdm
 import numpy as np
-# import llama
 import pandas as pd
 import warnings
-from einops import rearrange
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from baukit import Trace, TraceDict
-import sklearn
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from baukit import TraceDict
+from sklearn.metrics import accuracy_score
 from sklearn.linear_model import LogisticRegression
 import pickle
-from functools import partial
 
-from truthfulqa import utilities, models, metrics
-import openai
-from truthfulqa.configs import BEST_COL, ANSWER_COL, INCORRECT_COL
+try:
+    from truthfulqa import utilities, metrics
+    import openai
+    from truthfulqa.configs import BEST_COL, ANSWER_COL, INCORRECT_COL
+except ImportError:
+    print("Warning: TruthfulQA dependencies not available. Some evaluation functions may not work.")
 
 ENGINE_MAP = {
     # 'llama_7B': 'baffo32/decapoda-research-llama-7B-hf',
@@ -46,11 +43,9 @@ from truthfulqa.utilities import (
     format_prompt_with_answer_strings,
     split_multi_answer,
     format_best,
-    find_start,
 )
-from truthfulqa.presets import preset_map, COMPARE_PRIMER
-from truthfulqa.models import find_subsequence, set_columns, MC_calcs
-from truthfulqa.evaluate import format_frame, data_to_dict
+from truthfulqa.models import set_columns, MC_calcs
+from truthfulqa.evaluate import format_frame
 
 
 def load_nq():
@@ -74,8 +69,79 @@ def load_dataset(dataset_name):
     try:
         with open(file_path, 'r') as f:
             data = json.load(f)
+        return data
     except FileNotFoundError:
         raise ValueError(f"Dataset {dataset_name} not found.")
+
+def load_task_dataset(dataset_name):
+    """Load datasets from JSON files for MAT-Steer with unified schema."""
+    file_path = f"../data/{dataset_name}.json"
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        
+        # Process each dataset to return unified schema: list of {"text": str, "label": int}
+        processed_data = []
+        
+        if dataset_name == "truthfulqa":
+            # Expect format with questions, mc2_targets with choices and labels
+            for item in data:
+                question = item.get("question", "")
+                choices = item.get("mc2_targets", {}).get("choices", [])
+                labels = item.get("mc2_targets", {}).get("labels", [])
+                
+                for choice, label in zip(choices, labels):
+                    processed_data.append({
+                        "text": format_truthfulqa(question, choice),
+                        "label": int(label)
+                    })
+                    
+        elif dataset_name == "toxigen":
+            # Expect format with text/prompt and toxicity_score or label
+            for item in data:
+                text = item.get("text", item.get("prompt", ""))
+                if "label" in item:
+                    label = int(item["label"])
+                elif "toxicity_score" in item:
+                    toxicity_score = item.get("toxicity_score", 0.5)
+                    label = 1 if toxicity_score > 0.5 else 0
+                else:
+                    label = 0  # default to non-toxic
+                
+                processed_data.append({
+                    "text": text,
+                    "label": label
+                })
+                
+        elif dataset_name == "bbq":
+            # Expect format with context, question, ans0/ans1/ans2, label
+            for item in data:
+                context = item.get("context", "")
+                question = item.get("question", "")
+                base_text = f"{context} {question}" if context else question
+                
+                answers = [item.get(f"ans{i}", "") for i in range(3)]
+                correct_label = item.get("label", 0)
+                
+                for i, answer in enumerate(answers):
+                    if answer:  # Skip empty answers
+                        full_text = format_bbq(base_text, answer)
+                        label = 1 if i == correct_label else 0
+                        processed_data.append({
+                            "text": full_text,
+                            "label": label
+                        })
+        else:
+            # For other datasets, assume they already have the right format
+            # or can be used directly
+            processed_data = data
+            
+        return processed_data
+        
+    except FileNotFoundError:
+        raise ValueError(f"Dataset file ../data/{dataset_name}.json not found.")
+    except json.JSONDecodeError:
+        raise ValueError(f"Invalid JSON format in ../data/{dataset_name}.json")
 
 def format_truthfulqa(question, choice):
     return f"Q: {question} A: {choice}"

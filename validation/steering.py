@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import argparse
+import os
+import json
 
 
 def gaussian_kernel(x, y, sigma):
@@ -75,44 +77,123 @@ def train_multi_task_steering(tasks, num_attributes, batch_size, epochs, lr, sig
     model = SteeringModule(input_dim, num_attributes)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     
-    # Constructing balanced mini-batches
-    all_pos = torch.cat([tasks[task][0] for task in tasks], dim=0)
-    all_neg = torch.cat([tasks[task][1] for task in tasks], dim=0)
-    
-    dataset = torch.cat([all_pos, all_neg], dim=0)
-    labels = torch.cat([torch.ones(all_pos.shape[0]), torch.zeros(all_neg.shape[0])], dim=0)
-    indices = torch.randperm(dataset.shape[0])
-    dataset, labels = dataset[indices], labels[indices]
+    # Prepare balanced sampling from each task
+    task_names = list(tasks.keys())
     
     for epoch in range(epochs):
         optimizer.zero_grad()
         
-        total_loss = 0
-        for i in range(0, dataset.shape[0], batch_size):
-            batch_acts = dataset[i:i+batch_size]
-            batch_labels = labels[i:i+batch_size]
+        epoch_loss = 0
+        num_batches = 0
+        
+        # Sample balanced mini-batches from each attribute
+        min_samples = min(min(tasks[task][0].shape[0], tasks[task][1].shape[0]) for task in tasks)
+        effective_batch_size = min(batch_size // (2 * num_attributes), min_samples)
+        
+        if effective_batch_size < 1:
+            effective_batch_size = 1
+        
+        # Create batches by sampling from each task
+        for batch_idx in range(0, min_samples, effective_batch_size):
+            batch_activations = []
+            batch_labels = []
+            batch_task_indices = []
             
-            adjusted_acts, gates = model(batch_acts)
-            adjusted_acts = normalize_activations(batch_acts, adjusted_acts)  # Normalize activations
+            for t, task_name in enumerate(task_names):
+                pos_acts, neg_acts = tasks[task_name]
+                
+                # Sample positive and negative examples
+                pos_indices = torch.randperm(pos_acts.shape[0])[:effective_batch_size]
+                neg_indices = torch.randperm(neg_acts.shape[0])[:effective_batch_size]
+                
+                pos_batch = pos_acts[pos_indices]
+                neg_batch = neg_acts[neg_indices]
+                
+                batch_activations.append(pos_batch)
+                batch_activations.append(neg_batch)
+                
+                batch_labels.extend([1] * effective_batch_size)  # positive
+                batch_labels.extend([0] * effective_batch_size)  # negative
+                
+                batch_task_indices.extend([t] * effective_batch_size * 2)
             
-            pos_acts = adjusted_acts[batch_labels == 1]
-            neg_acts = adjusted_acts[batch_labels == 0]
+            batch_activations = torch.cat(batch_activations, dim=0)
+            batch_labels = torch.tensor(batch_labels, dtype=torch.float32)
+            batch_task_indices = torch.tensor(batch_task_indices, dtype=torch.long)
             
-            # Compute MMD loss 
-            loss_mmd = sum(compute_mmd(tasks[task][0], normalize_activations(tasks[task][1], model(tasks[task][1])[0]), sigma) for task in tasks) / len(tasks)
-            loss_sparse = sparsity_loss(gates[batch_labels == 0])
+            # Forward pass
+            adjusted_acts, gates = model(batch_activations)
+            adjusted_acts = normalize_activations(batch_activations, adjusted_acts)
+            
+            # Compute losses
+            total_loss = 0
+            
+            # MMD loss per attribute
+            loss_mmd = 0
+            for t, task_name in enumerate(task_names):
+                task_mask = batch_task_indices == t
+                if task_mask.sum() > 0:
+                    task_acts = adjusted_acts[task_mask]
+                    task_lbls = batch_labels[task_mask]
+                    
+                    pos_mask = task_lbls == 1
+                    neg_mask = task_lbls == 0
+                    
+                    if pos_mask.sum() > 0 and neg_mask.sum() > 0:
+                        pos_adjusted = task_acts[pos_mask]
+                        neg_adjusted = task_acts[neg_mask]
+                        
+                        # Compare adjusted negatives to original positives
+                        original_pos = tasks[task_name][0]
+                        sample_indices = torch.randperm(original_pos.shape[0])[:min(pos_adjusted.shape[0], original_pos.shape[0])]
+                        original_pos_sample = original_pos[sample_indices]
+                        
+                        loss_mmd += compute_mmd(neg_adjusted, original_pos_sample, sigma)
+            
+            loss_mmd = loss_mmd / num_attributes
+            
+            # Sparsity loss on negative examples
+            neg_mask = batch_labels == 0
+            if neg_mask.sum() > 0:
+                loss_sparse = sparsity_loss(gates[neg_mask])
+            else:
+                loss_sparse = torch.tensor(0.0)
+            
+            # Preservation loss on positive examples
+            pos_mask = batch_labels == 1
+            if pos_mask.sum() > 0:
+                loss_pos = preservation_loss(gates[pos_mask])
+            else:
+                loss_pos = torch.tensor(0.0)
+            
+            # Orthogonality loss
             loss_ortho = orthogonality_loss([sv for sv in model.steering_vectors])
-            loss_pos = preservation_loss(gates[batch_labels == 1])
             
-            batch_loss = lambda_mmd * loss_mmd + lambda_sparse * loss_sparse + lambda_ortho * loss_ortho + lambda_pos * loss_pos
+            # Combined loss
+            batch_loss = (lambda_mmd * loss_mmd + 
+                         lambda_sparse * loss_sparse + 
+                         lambda_ortho * loss_ortho + 
+                         lambda_pos * loss_pos)
+            
             batch_loss.backward()
-            total_loss += batch_loss.item()
             optimizer.step()
+            optimizer.zero_grad()
+            
+            epoch_loss += batch_loss.item()
+            num_batches += 1
         
         if epoch % 10 == 0:
-            print(f"Epoch {epoch}, Loss: {total_loss:.4f}")
+            avg_loss = epoch_loss / max(num_batches, 1)
+            print(f"Epoch {epoch}, Average Loss: {avg_loss:.4f}")
     
-    torch.save(model.state_dict(), save_path)
+    # Save model with metadata
+    checkpoint = {
+        'model_state_dict': model.state_dict(),
+        'input_dim': input_dim,
+        'num_attributes': num_attributes,
+        'task_names': task_names
+    }
+    torch.save(checkpoint, save_path)
     print(f"Model saved to {save_path}")
     
     return model
@@ -121,6 +202,8 @@ def train_multi_task_steering(tasks, num_attributes, batch_size, epochs, lr, sig
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, required=True, help="Specify the model name")
+    parser.add_argument("--layer", type=int, default=14, help="Layer index for intervention")
+    parser.add_argument("--save_path", type=str, default=None, help="Path to save the trained model")
     parser.add_argument("--batch_size", type=int, default=96, help="Batch size for training")
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
@@ -134,15 +217,50 @@ def main():
     datasets = ["truthfulqa", "toxigen", "bbq"]
     num_attributes = len(datasets)
     
+    if args.save_path is None:
+        args.save_path = f"checkpoints/{args.model_name}_L{args.layer}_mat_steer.pt"
+    
+    # Ensure checkpoints directory exists
+    os.makedirs(os.path.dirname(args.save_path), exist_ok=True)
+    
     tasks = {}
     for dataset_name in datasets:
-        token_labels = np.load(f'../features/{args.model_name}_{dataset_name}_token_labels.npy')
+        # Load the corrected labels (not token_labels)
+        labels = np.load(f'../features/{args.model_name}_{dataset_name}_labels.npy')
         all_layer_wise_activations = np.load(f'../features/{args.model_name}_{dataset_name}_layer_wise.npy')
-        pos_acts = torch.tensor(all_layer_wise_activations[token_labels == 1], dtype=torch.float32)
-        neg_acts = torch.tensor(all_layer_wise_activations[token_labels == 0], dtype=torch.float32)
+        
+        # Filter by positive/negative labels
+        pos_acts = torch.tensor(all_layer_wise_activations[labels == 1], dtype=torch.float32)
+        neg_acts = torch.tensor(all_layer_wise_activations[labels == 0], dtype=torch.float32)
         tasks[dataset_name] = (pos_acts, neg_acts)
+        
+        print(f"Dataset {dataset_name}: {pos_acts.shape[0]} positive, {neg_acts.shape[0]} negative examples")
     
-    train_multi_task_steering(tasks, num_attributes, args.batch_size, args.epochs, args.lr, args.sigma, args.lambda_mmd, args.lambda_sparse, args.lambda_ortho, args.lambda_pos, save_path=f"{args.model_name}_multi_qa.pth")
+    model = train_multi_task_steering(
+        tasks, num_attributes, args.batch_size, args.epochs, args.lr, args.sigma, 
+        args.lambda_mmd, args.lambda_sparse, args.lambda_ortho, args.lambda_pos, args.save_path
+    )
+    
+    # Save metadata with the checkpoint
+    metadata = {
+        'layer': args.layer,
+        'model_name': args.model_name,
+        'datasets': datasets,
+        'hyperparams': {
+            'lr': args.lr,
+            'sigma': args.sigma,
+            'lambda_mmd': args.lambda_mmd,
+            'lambda_sparse': args.lambda_sparse,
+            'lambda_ortho': args.lambda_ortho,
+            'lambda_pos': args.lambda_pos
+        }
+    }
+    
+    metadata_path = args.save_path.replace('.pt', '_metadata.json')
+    import json
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
     print("Training completed for all datasets.")
 
 

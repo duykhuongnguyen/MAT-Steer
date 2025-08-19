@@ -18,6 +18,8 @@ This repository provides the implementation for **Multi-Attribute Steering of La
 
 2. **Create necessary directories**:
    ```bash
+   mkdir -p features
+   mkdir -p validation/checkpoints
    mkdir -p validation/results_dump/summary_dump/test 
    mkdir -p validation/results_dump/summary_dump/val
    mkdir -p validation/answer_dump/summary_dump/test
@@ -27,18 +29,20 @@ This repository provides the implementation for **Multi-Attribute Steering of La
 ## **Running MAT-Steer**
 
 ### **1. Extract Model Activations**
-Navigate to the `get_activations` directory and run:
+Navigate to the `get_activations` directory and extract last-token activations at the specified layer:
    ```bash
-   CUDA_VISIBLE_DEVICES=0 python get_activations.py --model_name llama3.1_8B --dataset_name truthfulqa
-   CUDA_VISIBLE_DEVICES=0 python get_activations.py --model_name llama3.1_8B --dataset_name toxigen
-   CUDA_VISIBLE_DEVICES=0 python get_activations.py --model_name llama3.1_8B --dataset_name bbq
+   CUDA_VISIBLE_DEVICES=0 python get_activations.py --model_name llama3.1_8B --dataset_name truthfulqa --layer 14
+   CUDA_VISIBLE_DEVICES=0 python get_activations.py --model_name llama3.1_8B --dataset_name toxigen --layer 14
+   CUDA_VISIBLE_DEVICES=0 python get_activations.py --model_name llama3.1_8B --dataset_name bbq --layer 14
    ```
 
-### **2. Train Steering Vectors**
-Navigate to the `validation` directory. Running using the default setting:
+### **2. Train MAT-Steer Model**
+Navigate to the `validation` directory and train the multi-attribute steering vectors:
    ```bash
    python steering.py \
     --model_name llama3.1_8B \
+    --layer 14 \
+    --save_path checkpoints/llama3.1_8B_L14_mat_steer.pt \
     --batch_size 96 \
     --epochs 100 \
     --lr 0.001 \
@@ -49,8 +53,43 @@ Navigate to the `validation` directory. Running using the default setting:
     --lambda_pos 0.9
    ```
 
-### **3. Apply Targeted Intervention**
-Then the steering vectors can be integrated into models following [ITI](https://github.com/likenneth/honest_llama) and [pyvene](https://github.com/stanfordnlp/pyvene).
+### **3. Evaluate MAT-Steer Model**
+Evaluate the trained model on TruthfulQA:
+   ```bash
+   python run_mat_eval.py \
+    --model_name llama3.1_8B \
+    --checkpoint checkpoints/llama3.1_8B_L14_mat_steer.pt \
+    --layer 14 \
+    --instruction_prompt default \
+    --baseline
+   ```
+
+### **4. Apply Targeted Intervention at Runtime**
+To use MAT-Steer for runtime intervention in your own code with pyvene:
+
+```python
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from interveners import MATIntervener, create_mat_pyvene_config
+import pyvene as pv
+
+# Load model and tokenizer
+model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B", torch_dtype=torch.float16, device_map="auto")
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B")
+
+# Load MAT-Steer checkpoint
+mat_intervener = MATIntervener.load_from_checkpoint("checkpoints/llama3.1_8B_L14_mat_steer.pt", multiplier=1.0)
+
+# Create intervention config for layer 14
+pv_config = create_mat_pyvene_config([14], mat_intervener)
+
+# Wrap model with interventions
+intervenable_model = pv.IntervenableModel(pv_config, model)
+
+# Use the model for generation with MAT-Steer interventions
+inputs = tokenizer("What is the capital of France?", return_tensors="pt")
+outputs = intervenable_model.generate(**inputs, max_new_tokens=50)
+```
 
 ## **Citations**
 If you find this work useful, please consider citing our paper:

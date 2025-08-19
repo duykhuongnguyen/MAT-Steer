@@ -3,18 +3,15 @@ import os
 import torch
 from tqdm import tqdm
 import numpy as np
-import pickle
 import sys
+import argparse
 sys.path.append('../')
 
-import llama
-import pickle
-import argparse
-from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # Specific pyvene imports
-from utils import load_dataset, get_llama_activations_pyvene, tokenized_tqa, tokenized_tqa_2, tokenized_tqa_gen, tokenized_tqa_gen_end_q
-from interveners import wrapper, Collector, ITI_Intervener
+from utils import load_task_dataset, get_llama_activations_pyvene
+from interveners import wrapper, Collector
 import pyvene as pv
 
 HF_NAMES = {
@@ -55,16 +52,18 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(model_name_or_path, low_cpu_mem_usage=True, torch_dtype=torch.float16, device_map="auto")
     device = "cuda"
 
-    dataset = load_dataset(args.dataset_name)
-    if args.dataset_name == "truthfulqa": 
-        formatter = tokenized_tqa
-    elif args.dataset_name == "toxigen" or args.dataset_name == "bbq": 
-        formatter = tokenized_tqa_2
-    else: 
-        raise ValueError("Invalid dataset name")
-
+    dataset = load_task_dataset(args.dataset_name)
+    
     print("Tokenizing prompts")
-    prompts, labels = formatter(dataset, tokenizer)
+    prompts = []
+    labels = []
+    
+    for item in dataset:
+        text = item["text"]
+        label = item["label"]
+        prompt = tokenizer(text, return_tensors='pt').input_ids
+        prompts.append(prompt)
+        labels.append(label)
 
     collectors = []
     pv_config = []
@@ -79,21 +78,28 @@ def main():
 
     all_layer_wise_activations = []
     all_head_wise_activations = []
-    token_labels = []
 
     print("Getting activations")
-    for prompt in tqdm(prompts):
+    for i, prompt in enumerate(tqdm(prompts)):
         layer_wise_activations, head_wise_activations, _ = get_llama_activations_pyvene(collected_model, collectors, prompt, device)
-        for i in range(layer_wise_activations.shape[1]):
-            all_layer_wise_activations.append(layer_wise_activations[args.layer,i,:].copy())
-            token_labels.append(i)
-        all_head_wise_activations.append(head_wise_activations.copy())
+        # Extract only the last token activation from the specified layer
+        last_token_activation = layer_wise_activations[args.layer, -1, :].copy()  # (D,)
+        all_layer_wise_activations.append(last_token_activation)
+        
+        # For head-wise, also extract only last token
+        last_token_head_activation = head_wise_activations[args.layer, -1, :].copy()  # (H*d_head,)
+        all_head_wise_activations.append(last_token_head_activation)
+
+    # Convert to numpy arrays
+    all_layer_wise_activations = np.array(all_layer_wise_activations, dtype=np.float32)  # (N, D)
+    all_head_wise_activations = np.array(all_head_wise_activations, dtype=np.float32)  # (N, H*d_head)
+    labels = np.array(labels, dtype=np.int32)  # (N,)
+
+    # Ensure features directory exists
+    os.makedirs('../features', exist_ok=True)
 
     print("Saving labels")
     np.save(f'../features/{args.model_name}_{args.dataset_name}_labels.npy', labels)
-    
-    print("Saving token labels")
-    np.save(f'../features/{args.model_name}_{args.dataset_name}_token_labels.npy', token_labels)
 
     print("Saving layer wise activations")
     np.save(f'../features/{args.model_name}_{args.dataset_name}_layer_wise.npy', all_layer_wise_activations)
